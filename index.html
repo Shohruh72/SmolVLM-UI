@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>SmolVLM Inference App</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      background: #f5f5f5;
+      padding: 2rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    h1 { margin-bottom: 1rem; }
+    video, img {
+      width: 480px;
+      height: 360px;
+      border: 2px solid #333;
+      border-radius: 8px;
+      background: black;
+      margin-bottom: 1rem;
+      object-fit: cover;
+    }
+    canvas { display: none; }
+    .section {
+      background: white;
+      padding: 1rem;
+      margin-top: 1rem;
+      border-radius: 8px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+      width: 100%;
+      max-width: 600px;
+    }
+    label { font-weight: bold; margin-top: 0.5rem; display: block; }
+    select, input, textarea, button {
+      width: 100%;
+      padding: 0.5rem;
+      margin-top: 0.2rem;
+      font-size: 1rem;
+      border-radius: 6px;
+      border: 1px solid #ccc;
+      box-sizing: border-box;
+    }
+    textarea { resize: vertical; }
+    button { margin-top: 1rem; background-color: #28a745; color: white; border: none; cursor: pointer; }
+    button.stop { background-color: #dc3545; }
+  </style>
+</head>
+<body>
+  <h1>SmolVLM Inference App</h1>
+
+  <video id="videoFeed" autoplay muted playsinline style="display:none"></video>
+  <img id="imagePreview" style="display:none" />
+  <canvas id="canvas"></canvas>
+
+  <div class="section">
+    <label for="sourceType">Source Type</label>
+    <select id="sourceType">
+      <option value="webcam">Webcam</option>
+      <option value="video">Video File</option>
+      <option value="image">Image File</option>
+    </select>
+
+    <div id="videoFileSection" style="display: none;">
+      <label for="videoFile">Upload Video File</label>
+      <input type="file" id="videoFile" accept="video/*">
+    </div>
+
+    <div id="imageFileSection" style="display: none;">
+      <label for="imageFile">Upload Image File</label>
+      <input type="file" id="imageFile" accept="image/*">
+    </div>
+
+    <label for="baseURL">Base API</label>
+    <input id="baseURL" value="http://localhost:8080">
+
+    <label for="modelSelect">Select Model</label>
+    <select id="modelSelect">
+      <option value="ggml-org/SmolVLM-Instruct-GGUF">SmolVLM</option>
+      <option value="ggml-org/SmolVLM-256M-Instruct-GGUF">SmolVLM-256M</option>
+      <option value="ggml-org/SmolVLM-500M-Instruct-GGUF" selected>SmolVLM-500M</option>
+      <option value="ggml-org/SmolVLM2-2.2B-Instruct-GGUF">SmolVLM2-2.2B</option>
+      <option value="ggml-org/SmolVLM2-256M-Video-Instruct-GGUF">SmolVLM2-256M-Video</option>
+      <option value="ggml-org/SmolVLM2-500M-Video-Instruct-GGUF">SmolVLM2-500M-Video</option>
+    </select>
+
+    <label for="instructionText">Instruction</label>
+    <textarea id="instructionText">What do you see?</textarea>
+
+    <label for="responseText">Response</label>
+    <textarea id="responseText" readonly placeholder="Waiting for response..."></textarea>
+
+    <label for="intervalSelect">Capture Interval</label>
+    <select id="intervalSelect">
+      <option value="100">100ms</option>
+      <option value="250">250ms</option>
+      <option value="500" selected>500ms</option>
+      <option value="1000">1s</option>
+      <option value="2000">2s</option>
+    </select>
+
+    <button id="startButton" class="start">Start</button>
+  </div>
+
+  <script>
+    const video = document.getElementById('videoFeed');
+    const imagePreview = document.getElementById('imagePreview');
+    const canvas = document.getElementById('canvas');
+    const baseURL = document.getElementById('baseURL');
+    const instructionText = document.getElementById('instructionText');
+    const responseText = document.getElementById('responseText');
+    const intervalSelect = document.getElementById('intervalSelect');
+    const startButton = document.getElementById('startButton');
+    const modelSelect = document.getElementById('modelSelect');
+    const sourceType = document.getElementById('sourceType');
+    const videoFileInput = document.getElementById('videoFile');
+    const imageFileInput = document.getElementById('imageFile');
+    const videoFileSection = document.getElementById('videoFileSection');
+    const imageFileSection = document.getElementById('imageFileSection');
+
+    let stream;
+    let intervalId;
+    let isProcessing = false;
+    let imageDataURL = null;
+
+    modelSelect.addEventListener('change', () => {
+      baseURL.value = `http://localhost:8080?model=${modelSelect.value}`;
+    });
+
+    sourceType.addEventListener('change', () => {
+      stopStream();
+      video.style.display = 'none';
+      imagePreview.style.display = 'none';
+      videoFileSection.style.display = 'none';
+      imageFileSection.style.display = 'none';
+
+      switch (sourceType.value) {
+        case 'webcam':
+          initWebcam();
+          break;
+        case 'video':
+          videoFileSection.style.display = 'block';
+          break;
+        case 'image':
+          imageFileSection.style.display = 'block';
+          break;
+      }
+    });
+
+    videoFileInput.addEventListener('change', () => {
+      const file = videoFileInput.files[0];
+      if (file) {
+        const url = URL.createObjectURL(file);
+        video.srcObject = null;
+        video.src = url;
+        video.load();
+        video.play();
+        video.style.display = 'block';
+        responseText.value = "Video loaded. Ready to start.";
+      }
+    });
+
+    imageFileInput.addEventListener('change', () => {
+      const file = imageFileInput.files[0];
+      if (file) {
+        const reader = new FileReader();
+        reader.onload = e => {
+          imageDataURL = e.target.result;
+          imagePreview.src = imageDataURL;
+          imagePreview.style.display = 'block';
+          responseText.value = "Image loaded. Ready to start.";
+        };
+        reader.readAsDataURL(file);
+      }
+    });
+
+    async function initWebcam() {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        video.srcObject = stream;
+        video.style.display = 'block';
+        responseText.value = "Webcam access granted.";
+      } catch (err) {
+        console.error("Camera error:", err);
+        responseText.value = `Camera error: ${err.message}`;
+      }
+    }
+
+    function stopStream() {
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+        stream = null;
+      }
+    }
+
+    function captureImage() {
+      if (sourceType.value === 'image') {
+        return imageDataURL;
+      }
+      if (!video.videoWidth) return null;
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0);
+      return canvas.toDataURL('image/jpeg', 0.8);
+    }
+
+    async function sendChatCompletionRequest(instruction, imageBase64URL) {
+      const response = await fetch(`${baseURL.value}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          max_tokens: 100,
+          messages: [{
+            role: 'user',
+            content: [
+              { type: 'text', text: instruction },
+              { type: 'image_url', image_url: { url: imageBase64URL } }
+            ]
+          }]
+        })
+      });
+
+      if (!response.ok) {
+        const err = await response.text();
+        return `Server error: ${response.status} - ${err}`;
+      }
+
+      const data = await response.json();
+      return data.choices[0].message.content;
+    }
+
+    async function sendData() {
+      if (!isProcessing) return;
+      const image = captureImage();
+      if (!image) {
+        responseText.value = "Image capture failed.";
+        return;
+      }
+
+      try {
+        const reply = await sendChatCompletionRequest(instructionText.value, image);
+        responseText.value = reply;
+      } catch (err) {
+        responseText.value = `Error: ${err.message}`;
+      }
+    }
+
+    function handleStart() {
+      if (sourceType.value !== 'image' && !video.srcObject && !video.src) {
+        alert("No video source available.");
+        return;
+      }
+      if (sourceType.value === 'image' && !imageDataURL) {
+        alert("No image loaded.");
+        return;
+      }
+
+      isProcessing = true;
+      startButton.textContent = "Stop";
+      startButton.classList.replace('start', 'stop');
+
+      sendData();
+      if (sourceType.value !== 'image') {
+        intervalId = setInterval(sendData, parseInt(intervalSelect.value, 10));
+      }
+    }
+
+    function handleStop() {
+      isProcessing = false;
+      clearInterval(intervalId);
+      intervalId = null;
+      startButton.textContent = "Start";
+      startButton.classList.replace('stop', 'start');
+    }
+
+    startButton.addEventListener('click', () => {
+      isProcessing ? handleStop() : handleStart();
+    });
+
+    window.addEventListener('DOMContentLoaded', () => {
+      initWebcam();
+    });
+
+    window.addEventListener('beforeunload', () => {
+      stopStream();
+      clearInterval(intervalId);
+    });
+  </script>
+</body>
+</html>
